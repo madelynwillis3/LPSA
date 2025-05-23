@@ -28,7 +28,7 @@ library(knitr)
 ```{r Pull Data, warning=FALSE}
 
 #Step 1: pull data and calculate silt %
-results_df <- list.files("../data/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
+results_df <- list.files("../data (DO NOT PUSH)/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
   map_dfr(function(file_path) {
     df <- read_csv(file_path, col_names = FALSE, show_col_types = FALSE) %>%
       filter(!if_all(everything(), is.na))
@@ -46,7 +46,7 @@ results_df <- list.files("../data/LPSA data", pattern = "\\.csv$", recursive = T
     }
   }) %>%
   mutate(
-    silt = 100 - (sand + clay),
+    silt = 100 - (clay + sand),
     base_ID = str_remove(ID, "[A-Z]$"),
     letter = str_extract(ID, "[A-Z]$")
   )
@@ -101,7 +101,14 @@ texture_classes <- TT.points.in.classes(
   tri.data = selected_data,
   class.sys = "USDA.TT"
 )
-
+TT.plot(
+  tri.data = selected_data,
+  class.sys = "USDA.TT",
+  col = "black",
+  pch = 19,
+  cex = 0.5,
+  main = "Texture Classes for All Soil Samples"
+)
 # Extract primary and boundary info
 texture_info <- apply(texture_classes, 1, function(x) {
   max_val <- max(x)
@@ -138,6 +145,7 @@ results_df <- results_df %>%
       primary_texture == "SiCl" ~ "SIC",
       primary_texture == "SiClLo" ~ "SICL",
       primary_texture == "SiLo" ~ "SIL",
+      primary_texture == "Sa" ~ "S",
       TRUE ~ as.character(primary_texture)
     )
   )
@@ -152,15 +160,24 @@ results_table <- results_df %>%
   scroll_box(height = "400px")
 results_table
 
-write.csv(results_df, "../output/all_results_texture_05_23_2025.csv", row.names = FALSE)  # <-- include per-sample output too
+write.csv(results_df, "../output (DO NOT PUSH)//all_results_texture_05_23_2025.csv", row.names = FALSE)  # <-- include per-sample output too
 
 ```
 
 ### 5. Texture for grouped IDs
 
 ```{r Grouped IDs, warning = FALSE}
-# 4. Average by base_ID and assign texture class again
-summary_df <- results_df %>%
+# Count number of replicates per base_ID
+replicate_counts <- results_df %>%
+  count(base_ID) %>%
+  filter(n > 1)
+
+# Filter results_df to only those base_IDs with >1 replicate
+filtered_results_df <- results_df %>%
+  filter(base_ID %in% replicate_counts$base_ID)
+
+# Now summarize the filtered data
+summary_df <- filtered_results_df %>%
   group_by(base_ID) %>%
   summarise(
     SAND = mean(SAND, na.rm = TRUE),
@@ -168,13 +185,16 @@ summary_df <- results_df %>%
     CLAY = mean(CLAY, na.rm = TRUE),
     .groups = "drop"
   )
+
 selected_data <- summary_df %>% 
   select(CLAY,SILT,SAND) %>%
   as.data.frame()
+
 summary_matrix <- TT.points.in.classes(
   tri.data = selected_data %>% select(CLAY, SILT, SAND),
   class.sys = "USDA.TT"
 )
+
 summary_raw_names <- apply(summary_matrix, 1, function(x) colnames(summary_matrix)[which(x == 1)][1])
 
 summary_df$texture_class <- case_when(
@@ -191,22 +211,56 @@ summary_df$texture_class <- case_when(
   summary_raw_names == "SiCl" ~ "SIC",
   summary_raw_names == "SiClLo" ~ "SICL",
   summary_raw_names == "SiLo" ~ "SIL",
+  summary_raw_names == "Sa" ~ "S",
   TRUE ~ summary_raw_names
 )
+
 summary_df <- summary_df %>%
   dplyr::select(ID = base_ID, CLAY, SAND, SILT, texture_class) %>%
-  mutate(CLAYPCT = CLAY/100,
-         SANDPCT = SAND/100) %>%
+  mutate(CLAYPCT = CLAY / 100,
+         SANDPCT = SAND / 100) %>%
   clean_names()
 
+# Join sample_date back in, based on filtered results
 summary_df <- summary_df %>%
-  left_join(results_df %>% select(base_ID, sample_date) %>% distinct(), by = c("id" = "base_ID"))
-
-
+  left_join(filtered_results_df %>% select(base_ID, sample_date) %>% distinct(), by = c("id" = "base_ID")) %>%
+# Remove duplicates
+  distinct(id, .keep_all = TRUE) %>%
+  arrange(sample_date)
 summary_table <- summary_df %>%
-  kable(caption = "Averaged Texture Classes by base_ID", format = "html") %>%
+  kable(caption = "Averaged Texture Classes by ID (replicates are grouped)", format = "html") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 summary_table
 #write as csv:
-write.csv(summary_df, "../output/summarized_texture_05_21_2025.csv", row.names = FALSE)
+write.csv(summary_df, "../output (DO NOT PUSH)/summarized_texture_05_23_2025.csv", row.names = FALSE)
 ```
+
+
+```{r}
+library(soiltexture)
+library(dplyr)
+
+# Assuming `selected_data` has columns: clay, silt, sand, base_ID
+
+# Step 1: Define color palette and assign to base_ID
+unique_ids <- unique(selected_data$base_ID)
+colors <- rainbow(length(unique_ids))
+names(colors) <- unique_ids
+
+# Step 2: Assign colors to each row based on base_ID
+selected_data$color <- colors[selected_data$base_ID]
+
+# Step 3: Plot with color
+TT.plot(
+  tri.data = selected_data,
+  class.sys = "USDA.TT",
+  col = selected_data$color,
+  pch = 19,
+  cex = 0.5,
+  main = "Texture Classes Colored by Base ID"
+)
+# Step 4: Add legend
+legend("topright", legend = unique_ids, col = colors, pch = 19, cex = 0.6)
+
+```
+
