@@ -1,0 +1,212 @@
+---
+title: "Texture_05_23_2025"
+format: html
+author: "Madelyn Willis"
+---
+
+### 1. Packages
+
+```{r Load Libraries}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(tidyverse)
+library(purrr)
+library(tibble)
+library(readxl)
+library(writexl)
+library(janitor)
+library(aqp)
+library(Hmisc)
+library(soiltexture)
+library(kableExtra)
+library(knitr)
+```
+
+### 2. Load Data
+
+```{r Pull Data, warning=FALSE}
+
+#Step 1: pull data and calculate silt %
+results_df <- list.files("../data/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
+  map_dfr(function(file_path) {
+    df <- read_csv(file_path, col_names = FALSE, show_col_types = FALSE) %>%
+      filter(!if_all(everything(), is.na))
+
+    if (nrow(df) >= 39 && ncol(df) >= 2) {
+      folder_name <- basename(dirname(file_path))  # <-- gets the folder (date) name
+      tibble(
+        ID = as.character(df[4, 2][[1]]),
+        clay = as.numeric(gsub("[^0-9\\.]", "", df[34, 2][[1]])),
+        sand = as.numeric(gsub("[^0-9\\.]", "", df[39, 2][[1]])),
+        sample_date = folder_name  # <-- new column added here
+      )
+    } else {
+      NULL
+    }
+  }) %>%
+  mutate(
+    silt = 100 - (sand + clay),
+    base_ID = str_remove(ID, "[A-Z]$"),
+    letter = str_extract(ID, "[A-Z]$")
+  )
+
+```
+
+### 3. Detect Failures
+
+```{r detect failure, warning = FALSE}
+# 2. Detect differences > 5 between replicates
+check_differences <- function(df) {
+  n <- nrow(df)
+  if (n < 2) return(tibble())
+  combn(n, 2, simplify = FALSE) %>%
+    map_dfr(~{
+      row1 <- df[.x[1], ]
+      row2 <- df[.x[2], ]
+      tibble(
+        base_ID = row1$base_ID,
+        ID_1 = row1$ID,
+        ID_2 = row2$ID,
+        diff_sand = abs(row1$sand - row2$sand),
+        diff_clay = abs(row1$clay - row2$clay),
+        diff_silt = abs(row1$silt - row2$silt)
+      )
+    }) %>%
+    filter(diff_sand > 5 | diff_clay > 5 | diff_silt > 5)
+}
+
+failures_df <- results_df %>%
+  group_by(base_ID) %>%
+  group_map(~ check_differences(.x)) %>%
+  bind_rows()
+
+failures_table <- failures_df %>%
+  kable(caption = "Replicate Pairs with >5% Difference in Texture Components", format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+failures_table
+
+
+```
+
+### 4. Texture for all samples
+
+```{r All Samples, warning = FALSE}
+# Step 3: Main texture class
+selected_data <- results_df %>% 
+  select(CLAY = clay, SILT = silt, SAND = sand) %>%
+  as.data.frame()
+
+texture_classes <- TT.points.in.classes(
+  tri.data = selected_data,
+  class.sys = "USDA.TT"
+)
+
+# Extract primary and boundary info
+texture_info <- apply(texture_classes, 1, function(x) {
+  max_val <- max(x)
+  classes <- colnames(texture_classes)[which(x == max_val)]
+  list(
+    primary = classes[1],  # first class if tie
+    is_boundary = length(classes) > 1,
+    boundary_classes = if(length(classes) > 1) paste(classes, collapse = " / ") else NA_character_
+  )
+})
+
+# Add results back to results_df
+results_df <- results_df %>%
+  mutate(
+    primary_texture = sapply(texture_info, `[[`, "primary"),
+    is_boundary = sapply(texture_info, `[[`, "is_boundary"),
+    boundary_classes = sapply(texture_info, `[[`, "boundary_classes")
+  )
+
+# Map USDA texture names to your simplified classes
+results_df <- results_df %>%
+  mutate(
+    texture_class = case_when(
+      primary_texture == "SaClLo" ~ "SCL",
+      primary_texture == "Clo" ~ "CL",
+      primary_texture == "SaLo" ~ "SL",
+      primary_texture == "SaCl" ~ "SC",
+      primary_texture == "Lo" ~ "L",
+      primary_texture == "LoSa" ~ "LS",
+      primary_texture == "S" ~ "S",
+      primary_texture == "Cl" ~ "C",
+      primary_texture == "Si" ~ "SI",
+      primary_texture == "SiL" ~ "SIL",
+      primary_texture == "SiCl" ~ "SIC",
+      primary_texture == "SiClLo" ~ "SICL",
+      primary_texture == "SiLo" ~ "SIL",
+      TRUE ~ as.character(primary_texture)
+    )
+  )
+
+
+results_df <- results_df %>%
+  dplyr::select(ID = ID, CLAY = clay, SAND = sand, SILT = silt, texture_class, is_boundary, boundary_classes, base_ID, sample_date) 
+
+results_table <- results_df %>%
+  kable(caption = "Texture Classifications for All Soil Samples", format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(height = "400px")
+results_table
+
+write.csv(results_df, "../output/all_results_texture_05_23_2025.csv", row.names = FALSE)  # <-- include per-sample output too
+
+```
+
+### 5. Texture for grouped IDs
+
+```{r Grouped IDs, warning = FALSE}
+# 4. Average by base_ID and assign texture class again
+summary_df <- results_df %>%
+  group_by(base_ID) %>%
+  summarise(
+    SAND = mean(SAND, na.rm = TRUE),
+    SILT = mean(SILT, na.rm = TRUE),
+    CLAY = mean(CLAY, na.rm = TRUE),
+    .groups = "drop"
+  )
+selected_data <- summary_df %>% 
+  select(CLAY,SILT,SAND) %>%
+  as.data.frame()
+summary_matrix <- TT.points.in.classes(
+  tri.data = selected_data %>% select(CLAY, SILT, SAND),
+  class.sys = "USDA.TT"
+)
+summary_raw_names <- apply(summary_matrix, 1, function(x) colnames(summary_matrix)[which(x == 1)][1])
+
+summary_df$texture_class <- case_when(
+  summary_raw_names == "SaClLo" ~ "SCL",
+  summary_raw_names == "Clo" ~ "CL",
+  summary_raw_names == "SaLo" ~ "SL",
+  summary_raw_names == "SaCl" ~ "SC",
+  summary_raw_names == "Lo" ~ "L",
+  summary_raw_names == "LoSa" ~ "LS",
+  summary_raw_names == "S" ~ "S",
+  summary_raw_names == "Cl" ~ "C",
+  summary_raw_names == "Si" ~ "SI",
+  summary_raw_names == "SiL" ~ "SIL",
+  summary_raw_names == "SiCl" ~ "SIC",
+  summary_raw_names == "SiClLo" ~ "SICL",
+  summary_raw_names == "SiLo" ~ "SIL",
+  TRUE ~ summary_raw_names
+)
+summary_df <- summary_df %>%
+  dplyr::select(ID = base_ID, CLAY, SAND, SILT, texture_class) %>%
+  mutate(CLAYPCT = CLAY/100,
+         SANDPCT = SAND/100) %>%
+  clean_names()
+
+summary_df <- summary_df %>%
+  left_join(results_df %>% select(base_ID, sample_date) %>% distinct(), by = c("id" = "base_ID"))
+
+
+summary_table <- summary_df %>%
+  kable(caption = "Averaged Texture Classes by base_ID", format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+summary_table
+#write as csv:
+write.csv(summary_df, "../output/summarized_texture_05_21_2025.csv", row.names = FALSE)
+```
