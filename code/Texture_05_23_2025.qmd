@@ -190,10 +190,10 @@ selected_data <- summary_df %>%
   select(CLAY,SILT,SAND) %>%
   as.data.frame()
 
-summary_matrix <- TT.points.in.classes(
-  tri.data = selected_data %>% select(CLAY, SILT, SAND),
-  class.sys = "USDA.TT"
-)
+summary_matrix <-  TT.points.in.classes(
+  tri.data = selected_data %>% 
+    select(CLAY, SILT, SAND),
+  class.sys = "USDA.TT")
 
 summary_raw_names <- apply(summary_matrix, 1, function(x) colnames(summary_matrix)[which(x == 1)][1])
 
