@@ -232,7 +232,7 @@ summary_table <- summary_df %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 summary_table
 #write as csv:
-write.csv(summary_df, "../output (DO NOT PUSH)/summarized_texture_05_23_2025.csv", row.names = FALSE)
+write.csv(summary_df, "../output (DO NOT PUSH)/summarized_texture_05_30_2025.csv", row.names = FALSE)
 ```
 
 
