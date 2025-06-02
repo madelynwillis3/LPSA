@@ -28,7 +28,7 @@ library(knitr)
 ```{r Pull Data, warning=FALSE}
 
 #Step 1: pull data and calculate silt %
-results_df <- list.files("../data (DO NOT PUSH)/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
+results_df <- list.files("../data_do_not_push/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
   map_dfr(function(file_path) {
     df <- read_csv(file_path, col_names = FALSE, show_col_types = FALSE) %>%
       filter(!if_all(everything(), is.na))
@@ -48,8 +48,7 @@ results_df <- list.files("../data (DO NOT PUSH)/LPSA data", pattern = "\\.csv$",
   mutate(
     silt = 100 - (clay + sand),
     base_ID = str_remove(ID, "[A-Z]$"),
-    letter = str_extract(ID, "[A-Z]$")
-  )
+    letter = str_extract(ID, "[A-Z]$"))
 
 ```
 
@@ -81,10 +80,10 @@ failures_df <- results_df %>%
   group_map(~ check_differences(.x)) %>%
   bind_rows()
 
-failures_table <- failures_df %>%
-  kable(caption = "Replicate Pairs with >5% Difference in Texture Components", format = "html") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
-failures_table
+# failures_table <- failures_df %>%
+#   kable(caption = "Replicate Pairs with >5% Difference in Texture Components", format = "html") %>%
+#   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+# failures_table
 
 
 ```
@@ -128,7 +127,7 @@ results_df <- results_df %>%
     boundary_classes = sapply(texture_info, `[[`, "boundary_classes")
   )
 
-# Map USDA texture names to your simplified classes
+# Map USDA texture names to simplified classes
 results_df <- results_df %>%
   mutate(
     texture_class = case_when(
@@ -176,7 +175,7 @@ replicate_counts <- results_df %>%
 filtered_results_df <- results_df %>%
   filter(base_ID %in% replicate_counts$base_ID)
 
-# Now summarize the filtered data
+# Now summarize filtered data
 summary_df <- filtered_results_df %>%
   group_by(base_ID) %>%
   summarise(
@@ -232,35 +231,58 @@ summary_table <- summary_df %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 summary_table
 #write as csv:
-write.csv(summary_df, "../output (DO NOT PUSH)/summarized_texture_05_30_2025.csv", row.names = FALSE)
+today <- format(Sys.Date(), "%m_%d_%Y")
+filename <- paste0("../output_do_not_push/summarized_texture_", today, ".csv")
+write.csv(summary_df, filename, row.names = FALSE)
 ```
 
 
+### 6. Texture Differences in Failures
+
+```{r Complete Fails}
+# Add texture class for ID_1 and ID_2 
+failures_df <- failures_df %>%
+  left_join(results_df %>% select(ID, texture_class), by = c("ID_1" = "ID")) %>%
+  rename(texture_class_1 = texture_class) %>%
+  left_join(results_df %>% select(ID, texture_class), by = c("ID_2" = "ID")) %>%
+  rename(texture_class_2 = texture_class)
+
+# Filter for differences in texture class
+failures_diff_texture <- failures_df %>%
+  filter(texture_class_1 != texture_class_2)
+# Create table of failures with texture differences
+failures_diff_texture_table <- failures_diff_texture %>%
+  kable(caption = "Failed Textures: Must redo textures:", format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+failures_diff_texture_table
+
+```
+
 ```{r}
-library(soiltexture)
-library(dplyr)
-
-# Assuming `selected_data` has columns: clay, silt, sand, base_ID
-
-# Step 1: Define color palette and assign to base_ID
-unique_ids <- unique(selected_data$base_ID)
-colors <- rainbow(length(unique_ids))
-names(colors) <- unique_ids
-
-# Step 2: Assign colors to each row based on base_ID
-selected_data$color <- colors[selected_data$base_ID]
-
-# Step 3: Plot with color
-TT.plot(
-  tri.data = selected_data,
-  class.sys = "USDA.TT",
-  col = selected_data$color,
-  pch = 19,
-  cex = 0.5,
-  main = "Texture Classes Colored by Base ID"
-)
-# Step 4: Add legend
-legend("topright", legend = unique_ids, col = colors, pch = 19, cex = 0.6)
+# library(soiltexture)
+# library(dplyr)
+# 
+# # Assuming `selected_data` has columns: clay, silt, sand, base_ID
+# 
+# # Step 1: Define color palette and assign to base_ID
+# unique_ids <- unique(selected_data$base_ID)
+# colors <- rainbow(length(unique_ids))
+# names(colors) <- unique_ids
+# 
+# # Step 2: Assign colors to each row based on base_ID
+# selected_data$color <- colors[selected_data$base_ID]
+# 
+# # Step 3: Plot with color
+# TT.plot(
+#   tri.data = selected_data,
+#   class.sys = "USDA.TT",
+#   col = selected_data$color,
+#   pch = 19,
+#   cex = 0.5,
+#   main = "Texture Classes Colored by Base ID"
+# )
+# # Step 4: Add legend
+# legend("topright", legend = unique_ids, col = colors, pch = 19, cex = 0.6)
 
 ```
 
