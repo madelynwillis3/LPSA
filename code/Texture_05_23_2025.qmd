@@ -21,6 +21,7 @@ library(Hmisc)
 library(soiltexture)
 library(kableExtra)
 library(knitr)
+library(readr)
 ```
 
 ### 2. Load Data
@@ -185,12 +186,12 @@ summary_df <- filtered_results_df %>%
     .groups = "drop"
   )
 
-selected_data <- summary_df %>% 
+selected_data <- summary_df %>%
   select(CLAY,SILT,SAND) %>%
   as.data.frame()
 
 summary_matrix <-  TT.points.in.classes(
-  tri.data = selected_data %>% 
+  tri.data = selected_data %>%
     select(CLAY, SILT, SAND),
   class.sys = "USDA.TT")
 
@@ -256,6 +257,159 @@ failures_diff_texture_table <- failures_diff_texture %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 failures_diff_texture_table
 
+```
+
+### 7. Particle Size Classifications
+
+```{r Particle Class}
+
+
+df_raw <- read.csv("../data_do_not_push/LPSA data/June 2nd, 2025/Perry_250333A_ 2 Jun 2025_08-24_30.$av..csv", header = FALSE, stringsAsFactors = FALSE)
+
+particle_table <- df_raw[67:nrow(df_raw), c("V1", "V2")]
+colnames(particle_table) <- c("diameter_um", "volume_pct")
+
+# Convert to numeric
+particle_table$diameter_um <- as.numeric(particle_table$diameter_um)
+particle_table$volume_pct <- as.numeric(particle_table$volume_pct)
+
+# Drop any rows that are NA (in case the file has blank lines at the end)
+particle_table <- particle_table[!is.na(particle_table$diameter_um) & !is.na(particle_table$volume_pct), ]
+
+# View result
+head(particle_table)
+summary(particle_table)
+
+# Replace these with your actual limits and class names
+custom_classes <- data.frame(
+  class = c(
+    "fine_clay", "coarse_clay", "fine_silt", "coarse_silt",
+    "very_fine_sand", "fine_sand", "medium_sand", "coarse_sand", "very_coarse_sand",
+    "fine_gravel", "medium_gravel", "coarse_gravel", "cobbles", "stones", "boulders"
+  ),
+  upper_um = c(
+    0.2, 2, 20, 50, 100, 250, 500, 1000, 2000,
+    5000, 20000, 76000, 250000, 600000, Inf
+  )
+)
+
+assign_custom_class <- function(d) {
+  idx <- which(d <= custom_classes$upper_um)[1]
+  custom_classes$class[idx]
+}
+
+particle_table$custom_class <- sapply(particle_table$diameter_um, assign_custom_class)
+
+class_summary <- aggregate(volume_pct ~ custom_class, data = particle_table, sum)
+print(class_summary)
+
+# Assign your fine classes to USDA groups
+clay_classes <- c("fine_clay", "coarse_clay")
+silt_classes <- c("fine_silt", "coarse_silt")
+sand_classes <- c("very_fine_sand", "fine_sand", "medium_sand", "coarse_sand", "very_coarse_sand")
+
+# For subclass rules, keep the sand splits
+sand_subclasses <- c("very_coarse_sand", "coarse_sand", "medium_sand", "fine_sand", "very_fine_sand")
+
+# Calculate broad fractions
+pct_clay <- sum(class_summary$volume_pct[class_summary$custom_class %in% clay_classes])
+pct_silt <- sum(class_summary$volume_pct[class_summary$custom_class %in% silt_classes])
+pct_sand <- sum(class_summary$volume_pct[class_summary$custom_class %in% sand_classes])
+
+# For sand splits
+pct_vcs <- class_summary$volume_pct[class_summary$custom_class == "very_coarse_sand"]
+pct_cs  <- class_summary$volume_pct[class_summary$custom_class == "coarse_sand"]
+pct_ms  <- class_summary$volume_pct[class_summary$custom_class == "medium_sand"]
+pct_fs  <- class_summary$volume_pct[class_summary$custom_class == "fine_sand"]
+pct_vfs <- class_summary$volume_pct[class_summary$custom_class == "very_fine_sand"]
+
+# If any are missing, make sure they're 0
+if(length(pct_vcs)==0) pct_vcs <- 0
+if(length(pct_cs)==0) pct_cs <- 0
+if(length(pct_ms)==0) pct_ms <- 0
+if(length(pct_fs)==0) pct_fs <- 0
+if(length(pct_vfs)==0) pct_vfs <- 0
+
+assign_usda_texture_subclass <- function(pct_clay, pct_silt, pct_sand, 
+                                         pct_vcs, pct_cs, pct_ms, pct_fs, pct_vfs) {
+  # SAND GROUPS (Sands, coarse sand, sand, fine sand, very fine sand)
+  if (pct_sand > 85 && (pct_silt + 1.5 * pct_clay) < 15) {
+    if ((pct_vcs + pct_cs) >= 25 && max(pct_ms, pct_fs, pct_vfs) < 50) {
+      return("coarse sand")
+    } else if ((pct_fs >= 50 && pct_fs > pct_vfs) ||
+               ((pct_vcs + pct_cs + pct_ms) < 25 && pct_vfs < 50)) {
+      return("fine sand")
+    } else if (pct_vfs >= 50) {
+      return("very fine sand")
+    } else {
+      return("sand")
+    }
+  }
+  # LOAMY SANDS (apply similar logic for loamy subclasses)
+  if (pct_sand >= 70 && pct_sand <= 90 && (pct_silt + 1.5 * pct_clay) >= 15 && (pct_silt + 2*pct_clay) < 30) {
+    if ((pct_vcs + pct_cs) >= 25 && max(pct_ms, pct_fs, pct_vfs) < 50) {
+      return("loamy coarse sand")
+    } else if ((pct_fs >= 50 && pct_fs > pct_vfs) ||
+               ((pct_vcs + pct_cs + pct_ms) < 25 && pct_vfs < 50)) {
+      return("loamy fine sand")
+    } else if (pct_vfs >= 50) {
+      return("loamy very fine sand")
+    } else {
+      return("loamy sand")
+    }
+  }
+  # SANDY LOAMS
+  if (((pct_clay >= 7 && pct_clay < 20 && pct_sand > 52 && (pct_silt + 2*pct_clay) >= 30)) ||
+      (pct_clay < 7 && pct_silt < 50 && (pct_silt + 2*pct_clay) >= 30)) {
+    return("sandy loam")
+  }
+  # LOAM
+  if (pct_clay >= 7 && pct_clay < 27 && pct_silt >= 28 && pct_silt < 50 && pct_sand <= 52) {
+    return("loam")
+  }
+  # SILT LOAM
+  if ((pct_silt >= 50 && pct_clay >= 12 && pct_clay < 27) ||
+      (pct_silt >= 50 && pct_silt < 80 && pct_clay < 12)) {
+    return("silt loam")
+  }
+  # SILT
+  if (pct_silt >= 80 && pct_clay < 12) {
+    return("silt")
+  }
+  # SANDY CLAY LOAM
+  if (pct_clay >= 20 && pct_clay < 35 && pct_silt < 28 && pct_sand > 45) {
+    return("sandy clay loam")
+  }
+  # CLAY LOAM
+  if (pct_clay >= 27 && pct_clay < 40 && pct_sand > 20 && pct_sand <= 45) {
+    return("clay loam")
+  }
+  # SILTY CLAY LOAM
+  if (pct_clay >= 27 && pct_clay < 40 && pct_sand <= 20) {
+    return("silty clay loam")
+  }
+  # SANDY CLAY
+  if (pct_clay >= 35 && pct_sand > 45) {
+    return("sandy clay")
+  }
+  # SILTY CLAY
+  if (pct_clay >= 40 && pct_silt >= 40) {
+    return("silty clay")
+  }
+  # CLAY
+  if (pct_clay >= 40 && pct_sand <= 45 && pct_silt < 40) {
+    return("clay")
+  }
+  # If none fit, return "unclassified"
+  return("unclassified")
+}
+
+# Call with your numbers:
+usda_texture <- assign_usda_texture_subclass(
+  pct_clay, pct_silt, pct_sand, pct_vcs, pct_cs, pct_ms, pct_fs, pct_vfs
+)
+
+cat("USDA texture class/subclass:", usda_texture, "\n")
 ```
 
 ```{r}
