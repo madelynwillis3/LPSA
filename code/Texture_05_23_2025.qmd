@@ -234,7 +234,7 @@ summary_table
 #write as csv:
 today <- format(Sys.Date(), "%m_%d_%Y")
 filename <- paste0("../output_do_not_push/summarized_texture_", today, ".csv")
-write.csv(summary_df, filename, row.names = FALSE)
+# write.csv(summary_df, filename, row.names = FALSE)
 ```
 
 
