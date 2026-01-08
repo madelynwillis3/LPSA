@@ -22,94 +22,41 @@ library(soiltexture)
 library(kableExtra)
 library(knitr)
 library(readr)
-library(stringr)
-library(lubridate)
 ```
 
 ### 2. Load Data
 
 ```{r Pull Data, warning=FALSE}
+
 #Step 1: pull data and calculate silt %
-results_df <- list.files("F:/Willis/git/LPSA/data_do_not_push/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
+results_df <- list.files("../data_do_not_push/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
   map_dfr(function(file_path) {
-    # Read the file
     df <- read_csv(file_path, col_names = FALSE, show_col_types = FALSE) %>%
-      filter(!if_all(everything(), is.na))  # Remove completely empty rows
+      filter(!if_all(everything(), is.na))
 
-    # Locate `% <` and `% >` tables in column B
-    percent_less_start <- which(df[[2]] == "% <" & df[[1]] == "Size")
-    percent_greater_start <- which(df[[2]] == "% >" & df[[1]] == "Size")
-
-    # Skip files without both tables
-    if (length(percent_less_start) == 0 || length(percent_greater_start) == 0) {
-      warning(paste("Required tables `% <` or `% >` not found in file:", file_path))
-      return(NULL)
+    if (nrow(df) >= 39 && ncol(df) >= 2) {
+      folder_name <- basename(dirname(file_path))  # <-- gets the folder (date) name
+      tibble(
+        ID = as.character(df[4, 2][[1]]),
+        clay = as.numeric(gsub("[^0-9\\.]", "", df[34, 2][[1]])),
+        sand = as.numeric(gsub("[^0-9\\.]", "", df[39, 2][[1]])),
+        sample_date = folder_name  # <-- new column added here
+      )
+    } else {
+      NULL
     }
-
-    # Extract rows and validate structure for clay and sand
-    percent_less_row <- percent_less_start[1]
-    percent_greater_row <- percent_greater_start[1]
-
-    clay_row <- percent_less_row + 1
-    sand_row <- percent_greater_row + 2
-
-    if (df[clay_row, 1] != "2") {
-      warning(paste("Expected `2` under `% <` not found in file:", file_path))
-      return(NULL)
-    }
-    if (df[sand_row, 1] != "50") {
-      warning(paste("Expected `50` under `% >` not found in file:", file_path))
-      return(NULL)
-    }
-
-    # Extract clay and sand values
-    clay <- as.numeric(gsub("[^0-9\\.]+", "", df[clay_row, 2]))
-    sand <- as.numeric(gsub("[^0-9\\.]+", "", df[sand_row, 2]))
-
-    # Validate extracted values
-    if (is.na(clay) || is.na(sand) || clay < 0 || sand < 0 || clay + sand > 100) {
-      warning(paste("Invalid clay and sand values in file:", file_path))
-      return(NULL)
-    }
-
-    # Extract meta information: ID, base_ID, and sample_date
-    sample_id <- as.character(df[4, 2][[1]])
-    if (is.na(sample_id) || sample_id == "") {
-      warning(paste("Sample ID missing or invalid for file:", file_path))
-      return(NULL)
-    }
-    base_id <- str_remove(sample_id, "[A-Z]$")  # Base ID (excluding final letter)
-    sample_date <- basename(dirname(file_path))  # Extract folder name as date
-
-    # Return results
-    tibble(
-      ID = sample_id,
-      base_ID = base_id,
-      sample_date = sample_date,
-      clay = clay,
-      sand = sand,
-      silt = 100 - (clay + sand)  # Calculate silt
-    )
   }) %>%
   mutate(
-    CLAYPCT = clay / 100,  # Add percent columns for consistency
-    SANDPCT = sand / 100,
-    SILTPCT = silt / 100
-  ) %>%
-  select(ID, base_ID, sample_date, CLAYPCT, SANDPCT, SILTPCT, clay, sand, silt) %>%
-  arrange(sample_date)
+    silt = 100 - (clay + sand),
+    base_ID = str_remove(ID, "[A-Z]$"),
+    letter = str_extract(ID, "[A-Z]$"))
 
-print("Final Results Dataframe:")
-print(results_df)
 ```
-
-
-
 
 ### 3. Detect Failures
 
 ```{r detect failure, warning = FALSE}
-# 3. Detect differences > 5 between replicates
+# 2. Detect differences > 5 between replicates
 check_differences <- function(df) {
   n <- nrow(df)
   if (n < 2) return(tibble())
@@ -142,54 +89,7 @@ failures_df <- results_df %>%
 
 ```
 
-```{r Detect high dilution samples, warning = FALSE}
-folder <- "../data_do_not_push/LPSA data/"
-dfiles <- list.files(folder, pattern = "\\.\\$(ls|av)$", recursive = TRUE, ignore.case = TRUE)
 
-extract_sample_num <- function(filename) {
-  # Adjust this regex as needed for your actual file name format!
-  # This will find a sequence of digits followed by a capital letter
-  match <- regexpr("[0-9]+[A-Z]", filename)
-  if (match[1] != -1) {
-    substr(filename, match[1], match[1] + attr(match, "match.length") - 1)
-  } else {
-    NA
-  }
-}
-
-extract_dilution <- function(filepath) {
-  lines <- readLines(filepath)
-  # Find the line that contains "Dilutions="
-  dil_line <- grep("Dilutions=", lines, value = TRUE)
-  if (length(dil_line) > 0) {
-    # Extract the number after "Dilutions="
-    as.numeric(sub(".*Dilutions= *([0-9]+).*", "\\1", dil_line[1]))
-  } else {
-    NA
-  }
-}
-
-dfiles <- list.files(folder, pattern = "\\.\\$(ls|av)$", recursive = TRUE, ignore.case = TRUE)
-
-results <- lapply(dfiles, function(file) {
-  sample_num <- extract_sample_num(file)
-  dilution <- extract_dilution(file.path(folder, file))
-  data.frame(sample_num = sample_num, dilution = dilution, filename = file, stringsAsFactors = FALSE)
-})
-
-dilutions <- do.call(rbind, results)
-print(dilutions)
-
-filtered_df15 <- subset(dilutions, dilution > 14) %>%
-#unique samples with high dilution
-  group_by(sample_num) %>%
-  summarise(dilution = max(dilution), filename = first(filename), .groups = "drop")
-
-#filter by 10-14 dilutions
-filtered_df10_14 <- subset(dilutions, dilution > 10 & dilution <= 14) %>%
-  group_by(sample_num) %>%
-  summarise(dilution = max(dilution), filename = first(filename), .groups = "drop")
-```
 
 
 ### 4. Texture for all samples
@@ -271,7 +171,7 @@ write.csv(results_df, filename, row.names = FALSE)
 
 ```
 
-### 5. Texture for grouped IDs
+### 5. Texture for grouped IDs (This is your average texture based on your replicates)
 
 ```{r Grouped IDs, warning = FALSE}
 # Count number of replicates per base_ID
@@ -345,7 +245,7 @@ write.csv(summary_df, filename, row.names = FALSE)
 ```
 
 
-### 6. Texture Differences in Failures
+### 6. Texture Differences in Failures ( If two failed samples have the same texture, I did not rerun them, but you may want to depending on your study)
 
 ```{r Complete Fails}
 # Add texture class for ID_1 and ID_2 
@@ -358,61 +258,15 @@ failures_df <- failures_df %>%
 # Filter for differences in texture class
 failures_diff_texture <- failures_df %>%
   filter(texture_class_1 != texture_class_2)
-#filter for where the texture classes are not different:
-failures_same_texture <- failures_df %>%
-  filter(texture_class_1 == texture_class_2)
 # Create table of failures with texture differences
 failures_diff_texture_table <- failures_diff_texture %>%
   kable(caption = "Failed Textures: Must redo textures:", format = "html") %>%
   kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
 failures_diff_texture_table
 
-
-failures_same_texture_table <- failures_same_texture %>%
-  kable(caption = "Failed Textures with same texture class", format = "html") %>%
-  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
-failures_same_texture_table
-
-#find samples where base Id is found in failures_diff_texture but not failures_same_texture
-
 ```
 
-
-
-```{r}
-
-
-```
-
-```{r}
-#final texture for base Ids, only averaging samples with same base ID that had the same texture class. It is OK if they failed. Also removing samples that had clay at 80% or more. 
-# STEP 1: Filter out samples with CLAY >= 80%
-filtered_results <- results_df %>%
-  filter(CLAY < 80)  # Retain only rows with CLAY < 80%
-
-# STEP 2: Group by base_ID and texture_class, then compute averages
-final_texture <- filtered_results %>%
-  group_by(base_ID, texture_class) %>%
-  summarise(
-    avg_clay = mean(CLAY, na.rm = TRUE),  # Average CLAY
-    avg_silt = mean(SILT, na.rm = TRUE),  # Average SILT
-    avg_sand = mean(SAND, na.rm = TRUE),  # Average SAND
-    num_replicates = n(),                # Number of replicates in the group
-    .groups = "drop"                     # Drop grouping for a clean final output
-  )
-
-# STEP 3: Save the final results as a CSV file
-today <- format(Sys.Date(), "%m_%d_%Y")
-output_filename <- paste0("../output_do_not_push/final_texture_averages_", today, ".csv")
-write.csv(final_texture, output_filename, row.names = FALSE)
-
-# Print the final table for review
-cat("\nFinal Averaged Texture Results:\n")
-print(final_texture)
-
-```
-
-### 7. Particle Size Classifications
+### 7. Particle Size Classifications (not working but feel free to modify)
 
 ```{r Particle Class}
 

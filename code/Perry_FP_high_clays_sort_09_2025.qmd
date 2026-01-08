@@ -1,0 +1,91 @@
+---
+title: "Perry_FP_high_clays_sort_09_2025"
+format: html
+---
+
+#Packages:
+```{r}
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(janitor)
+library(lubridate)
+library(ggplot2)
+library(ggrepel)
+library(broom)
+library(knitr)
+
+
+
+```
+
+```{r Detect high dilution samples, warning = FALSE}
+folder <- "../data_do_not_push/LPSA data/"
+dfiles <- list.files(folder, pattern = "\\.\\$(ls|av)$", recursive = TRUE, ignore.case = TRUE)
+
+extract_sample_num <- function(filename) {
+  # Adjust this regex as needed for your actual file name format!
+  # This will find a sequence of digits followed by a capital letter
+  match <- regexpr("[0-9]+[A-Z]", filename)
+  if (match[1] != -1) {
+    substr(filename, match[1], match[1] + attr(match, "match.length") - 1)
+  } else {
+    NA
+  }
+}
+
+extract_dilution <- function(filepath) {
+  lines <- readLines(filepath)
+  # Find the line that contains "Dilutions="
+  dil_line <- grep("Dilutions=", lines, value = TRUE)
+  if (length(dil_line) > 0) {
+    # Extract the number after "Dilutions="
+    as.numeric(sub(".*Dilutions= *([0-9]+).*", "\\1", dil_line[1]))
+  } else {
+    NA
+  }
+}
+
+dfiles <- list.files(folder, pattern = "\\.\\$(ls|av)$", recursive = TRUE, ignore.case = TRUE)
+
+results <- lapply(dfiles, function(file) {
+  sample_num <- extract_sample_num(file)
+  dilution <- extract_dilution(file.path(folder, file))
+  data.frame(sample_num = sample_num, dilution = dilution, filename = file, stringsAsFactors = FALSE)
+})
+
+dilutions <- do.call(rbind, results)
+
+
+#filter all samples with dilutions greater than 11:
+high_dilutions <- dilutions %>%
+  filter(dilution >= 11) %>%
+  arrange(desc(dilution)) %>%
+  distinct(sample_num, .keep_all = TRUE)
+
+```
+
+```{r}
+#pull in texture results:
+#read csv:
+texture <- read_csv("../output_do_not_push/all_results_texture_09_05_2025.csv") 
+
+#attach dilutions to texture:
+texture_dilutions <- texture %>%
+  left_join(high_dilutions, by = c("ID" = "sample_num")) %>%
+  arrange(desc(dilution)) %>%
+  filter(!is.na(dilution))
+
+texture_dilutions
+
+#group by base_ID and average everything else:
+texture_dilutions_avg <- texture_dilutions %>%
+  group_by(base_ID) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = 'drop') %>%
+  #sort sand descending:
+  arrange(desc(SAND))
+texture_dilutions_avg
+#write csv:
+write_csv(texture_dilutions_avg, "../output_do_not_push/Perry_FP_high_clays_sort_09_2025.csv")
+```
+
