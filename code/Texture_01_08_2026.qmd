@@ -30,7 +30,7 @@ library(lubridate)
 
 ```{r Pull Data, warning=FALSE}
 #Step 1: pull data and calculate silt %
-results_df <- list.files("F:/Willis/git/LPSA/data_do_not_push/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
+results_df <- list.files("F:/Willis/git/LPSA/data_do_not_push/LPSA data", pattern = "\\.(csv|CSV)$", recursive = TRUE, full.names = TRUE) %>%
   map_dfr(function(file_path) {
     # Read the file
     df <- read_csv(file_path, col_names = FALSE, show_col_types = FALSE) %>%
@@ -141,6 +141,8 @@ failures_df <- results_df %>%
 
 
 ```
+
+### 3.5. High dilution detection
 
 ```{r Detect high dilution samples, warning = FALSE}
 folder <- "../data_do_not_push/LPSA data/"
@@ -377,10 +379,110 @@ failures_same_texture_table
 
 ```
 
-
+### 7. Final averaged textures for HZ
 
 ```{r}
+# Step 1: Filter out samples with CLAY >= 80% ---------------------------------
+filtered_results <- results_df %>%
+  filter(CLAY < 80)  # Remove high-clay samples
 
+# Debug: Check how many rows remain after filtering
+cat("Total rows after filtering high-clay samples:", nrow(filtered_results), "\n")
+
+# Step 2: Group by base_ID and calculate averages -----------------------------
+averaged_results <- filtered_results %>%
+  group_by(base_ID) %>%
+  summarise(
+    avg_clay = mean(CLAY, na.rm = TRUE),  # Average CLAY
+    avg_silt = mean(SILT, na.rm = TRUE),  # Average SILT
+    avg_sand = mean(SAND, na.rm = TRUE),  # Average SAND
+    num_replicates = n(),                # Count replicates
+    .groups = "drop"                     # Drop grouping for clean final results
+  )
+
+# Step 3: Assign texture classes for averaged results -------------------------
+# Prepare data for USDA texture classification
+selected_data <- averaged_results %>%
+  select(CLAY = avg_clay, SILT = avg_silt, SAND = avg_sand) %>%
+  as.data.frame()
+
+# Classify soil samples into USDA texture classes
+texture_classes <- TT.points.in.classes(
+  tri.data = selected_data,
+  class.sys = "USDA.TT"
+)
+
+# Determine primary texture, boundary status, and multiple classes (boundary cases)
+texture_info <- apply(texture_classes, 1, function(x) {
+  max_val <- max(x)
+  classes <- colnames(texture_classes)[which(x == max_val)]
+  list(
+    primary = classes[1],  # Use the first class in case of ties
+    is_boundary = length(classes) > 1,
+    boundary_classes = if (length(classes) > 1) paste(classes, collapse = " / ") else NA_character_
+  )
+})
+
+# Add texture classification details back to the averaged results
+averaged_results <- averaged_results %>%
+  mutate(
+    primary_texture = sapply(texture_info, `[[`, "primary"),
+    is_boundary = sapply(texture_info, `[[`, "is_boundary"),
+    boundary_classes = sapply(texture_info, `[[`, "boundary_classes")
+  )
+
+# Simplify texture classes
+averaged_results <- averaged_results %>%
+  mutate(
+    texture_class = case_when(
+      primary_texture == "SaClLo" ~ "SCL",
+      primary_texture == "Clo" ~ "CL",
+      primary_texture == "SaLo" ~ "SL",
+      primary_texture == "SaCl" ~ "SC",
+      primary_texture == "Lo" ~ "L",
+      primary_texture == "LoSa" ~ "LS",
+      primary_texture == "S" ~ "S",
+      primary_texture == "Cl" ~ "C",
+      primary_texture == "Si" ~ "SI",
+      primary_texture == "SiL" ~ "SIL",
+      primary_texture == "SiCl" ~ "SIC",
+      primary_texture == "SiClLo" ~ "SICL",
+      primary_texture == "SiLo" ~ "SIL",
+      primary_texture == "Sa" ~ "S",
+      TRUE ~ primary_texture  # Use the USDA class if not mapped
+    )
+  )
+
+# Step 4: Generate and save results tables -------------------------------------
+# Final table: Flatten results for export
+final_results <- averaged_results %>%
+  clean_names()  # Ensure consistent column naming
+
+# Save the summarized texture classification results
+today <- format(Sys.Date(), "%m_%d_%Y")
+summary_filename <- paste0("../output_do_not_push/grouped_texture_", today, ".csv")
+write.csv(final_results, summary_filename, row.names = FALSE)
+
+cat("Final summarized results saved to file:", summary_filename, "\n")
+
+# Generate an HTML results table for markdown or reports
+results_table <- final_results %>%
+  select(base_id, avg_clay, avg_silt, avg_sand, texture_class, num_replicates, is_boundary, boundary_classes) %>%
+  kable(
+    caption = "Summarized Texture Classifications by Base ID",
+    format = "html"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  scroll_box(height = "400px")
+
+cat("\nSummary Table:\n")
+print(results_table)
+
+# Save the filtered per-sample results if needed
+per_sample_filename <- paste0("../output_do_not_push/all_filtered_samples_", today, ".csv")
+write.csv(filtered_results, per_sample_filename, row.names = FALSE)
+
+cat("Filtered per-sample results saved to file:", per_sample_filename, "\n")
 
 ```
 
