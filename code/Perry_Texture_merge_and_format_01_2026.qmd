@@ -3,3 +3,27 @@ title: "Perry_Texture_merge_and_format_01_2026"
 format: html
 ---
 
+```{r}
+#packages to convert .xlsx to .csv:
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(gdata)
+```
+
+```{r}
+# in "../data_do_not_push/LPSA data", convert all .xls files (old excel) into .csv from all folders inside here:
+file_list <- list.files(path = "../data_do_not_push/LPSA data", pattern = "\\.xls$", recursive = TRUE, full.names = TRUE)
+# Install the package if not already installed
+install.packages("readxlsb")
+
+# Use it to read the file
+library(readxlsb)
+
+file <- "../data_do_not_push/LPSA data/June 21st, 2024/Perry2024_240356A_21 Jun 2024_14-24_111.$av..xls"
+data <- readxlsb::read_xls(file)
+
+# Write the data to CSV
+write.csv(data, "output.csv", row.names = FALSE)
+```
+
