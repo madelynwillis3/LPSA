@@ -30,7 +30,8 @@ library(lubridate)
 
 ```{r Pull Data, warning=FALSE}
 #Step 1: pull data and calculate silt %
-results_df <- list.files("F:/Willis/git/LPSA/data_do_not_push/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE) %>%
+results_df <- list.files("F:/Willis/git/LPSA/data_do_not_push/LPSA data", pattern = "\\.csv$", recursive = TRUE, full.names = TRUE, ignore.case = TRUE
+) %>%
   map_dfr(function(file_path) {
     # Read the file
     df <- read_csv(file_path, col_names = FALSE, show_col_types = FALSE) %>%
@@ -142,7 +143,8 @@ failures_df <- results_df %>%
 
 ```
 
-```{r Detect high dilution samples, warning = FALSE}
+```{r Detect high dilution samples, warning = FALSE, eval=FALSE}
+#do not run:
 folder <- "../data_do_not_push/LPSA data/"
 dfiles <- list.files(folder, pattern = "\\.\\$(ls|av)$", recursive = TRUE, ignore.case = TRUE)
 
