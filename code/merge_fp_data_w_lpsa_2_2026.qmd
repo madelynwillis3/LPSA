@@ -3,3 +3,43 @@ title: "merge_fp_data_w_lpsa_2_2026"
 format: html
 ---
 
+```{r}
+library(dplyr)
+library(stringr)
+```
+
+```{r}
+lpsa <- read.csv("../output_do_not_push/lpsa_final_texture_results_02_04_2026.csv")
+
+fp_data <- read.csv("../data/fp_morphological_data/Perry Full-Profile SampleData 1_15_2026_corrected.csv")
+
+#fp_data ID is Sample.ID.Lab, and lpsa is base_id:
+
+fp_data <- fp_data %>%
+  mutate(Sample.ID.Lab = str_trim(as.character(Sample.ID.Lab)))
+
+lpsa <- lpsa %>%
+  mutate(BASE_ID = str_trim(as.character(BASE_ID)))
+# Check for missing IDs in lpsa
+fp_missing_in_lpsa <- fp_data %>%
+  filter(!Sample.ID.Lab %in% lpsa$BASE_ID)
+
+nrow(fp_missing_in_lpsa)
+fp_missing_in_lpsa
+
+#find samples in lpsa not in fp_data
+lpsa_missing_in_fp <- lpsa %>%
+  filter(!BASE_ID %in% fp_data$Sample.ID.Lab)
+nrow(lpsa_missing_in_fp)
+lpsa_missing_in_fp
+```
+```{r}
+#merge datasets. Keep all rows from fp_data, and match with BASE_ID and Sample.ID.Lab. Keep all columns from both datasets.
+
+merged_data <- fp_data %>%
+  left_join(lpsa, by = c("Sample.ID.Lab" = "BASE_ID"))
+
+merged_data
+```
+
+

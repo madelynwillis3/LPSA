@@ -9,12 +9,22 @@ library(tidyverse)
 library(readr)
 library(stringr)
 library(soiltexture)
+library(knitr)
+library(kableExtra)
 ```
 
 ### Load Data
 
 ```{r}
-lpsa <- read_csv("../output_do_not_push/lpsa_fixed_02_03_2026.csv")
+#lpsa <- read_csv("../output_do_not_push/lpsa_fixed_02_03_2026.csv")
+lpsa <- read_csv("../output_do_not_push/lpsa_all_results_02_04_2026.csv") %>%
+  rename(ID = sample_id, clay = clay_pct, sand = sand_pct, date = date_sampled)
+#add silt:
+lpsa <- lpsa %>%
+  mutate(silt = 100 - sand - clay) %>%
+  #create base ID by removing letter:
+  mutate(BASE_ID = str_remove(ID, "[A-Z]$"))
+
 ```
 
 ### Texture Classification
@@ -80,7 +90,7 @@ lpsa2 <- lpsa2 %>%
 
 
 lpsa2 <- lpsa2 %>%
-  dplyr::select(ID = ID, CLAY = clay, SAND = sand, SILT = silt, texture_class, is_boundary, boundary_classes, base_ID, sample_date) 
+  dplyr::select(BASE_ID = BASE_ID,ID = ID, CLAY = clay, SAND = sand, SILT = silt, texture_class, is_boundary, boundary_classes, date) 
 
 results_table <- lpsa2 %>%
   kable(caption = "Texture Classifications for All Soil Samples", format = "html") %>%
@@ -90,19 +100,23 @@ results_table
 
 
 ```
-### Base_ID Texture Class Agreement
+### BASE_ID Texture Class Agreement
 
 ```{r}
 # ============================================================
-# base_ID agreement / disagreement on texture_class
+# BASE_ID agreement / disagreement on texture_class
 # Rule:
-#   OK     = at least one class has n >= 2 within base_ID
+#   OK     = at least one class has n >= 2 within BASE_ID
 #   FAILED = no class has n >= 2 (all samples disagree)
 # ============================================================
+#remove samples where clay = 100:
+lpsa2 <- lpsa2 %>%
+  filter(!(CLAY > 85))
+
 
 base_summary <- lpsa2 %>%
-  filter(!is.na(base_ID), base_ID != "", !is.na(texture_class), texture_class != "") %>%
-  group_by(base_ID) %>%
+  filter(!is.na(BASE_ID), BASE_ID != "", !is.na(texture_class), texture_class != "") %>%
+  group_by(BASE_ID) %>%
   summarise(
     n_samples = n(),
     # frequency table of classes as a compact string: "SL:2 | L:1"
@@ -116,15 +130,15 @@ base_summary <- lpsa2 %>%
     status = if_else(max_class_n >= 2, "OK", "FAILED"),
     .groups = "drop"
   ) %>%
-  arrange(desc(n_samples), desc(max_class_n), base_ID)
+  arrange(desc(n_samples), desc(max_class_n), BASE_ID)
 
 # Lists you asked for
 agreement_baseIDs <- base_summary %>% filter(status == "OK")
 disagreement_baseIDs <- base_summary %>% filter(status == "FAILED")
 
 # If you also want the underlying samples for each list:
-agreement_samples <- lpsa2 %>% semi_join(agreement_baseIDs, by = "base_ID") %>% arrange(base_ID, ID)
-disagreement_samples <- lpsa2 %>% semi_join(disagreement_baseIDs, by = "base_ID") %>% arrange(base_ID, ID)
+agreement_samples <- lpsa2 %>% semi_join(agreement_baseIDs, by = "BASE_ID") %>% arrange(BASE_ID, ID)
+disagreement_samples <- lpsa2 %>% semi_join(disagreement_baseIDs, by = "BASE_ID") %>% arrange(BASE_ID, ID)
 
 # Quick counts
 base_summary %>% count(status)
@@ -139,15 +153,15 @@ disagreement_baseIDs
 
 ```{r}
 # ============================================================
-# Rescue check for disagreement base_IDs using sand/clay tolerance
+# Rescue check for disagreement BASE_IDs using sand/clay tolerance
 # ============================================================
 
 tol <- 5  # tolerance in percentage points (0–100 scale)
 
-disagree_ids <- disagreement_baseIDs %>% select(base_ID)
+disagree_ids <- disagreement_baseIDs %>% select(BASE_ID)
 
 disagree_samples <- lpsa2 %>%
-  semi_join(disagree_ids, by = "base_ID") %>%
+  semi_join(disagree_ids, by = "BASE_ID") %>%
   filter(!is.na(SAND), !is.na(CLAY)) %>%
   mutate(
     SAND = as.numeric(SAND),
@@ -155,7 +169,7 @@ disagree_samples <- lpsa2 %>%
   )
 
 pairwise_df <- disagree_samples %>%
-  group_by(base_ID) %>%
+  group_by(BASE_ID) %>%
   group_modify(\(d, key) {
     if (nrow(d) < 2) return(tibble())  # no pairs possible
 
@@ -179,7 +193,7 @@ pairwise_df <- disagree_samples %>%
 
 # Base-level verdict
 base_rescue <- pairwise_df %>%
-  group_by(base_ID) %>%
+  group_by(BASE_ID) %>%
   summarise(
     n_samples = n_distinct(c(ID_1, ID_2)),
     n_pairs = n(),
@@ -193,18 +207,18 @@ base_rescue <- pairwise_df %>%
     .groups = "drop"
   ) %>%
   select(-best_i) %>%
-  arrange(status, best_min_diff, base_ID)
+  arrange(status, best_min_diff, BASE_ID)
 
 rescued_baseIDs <- base_rescue %>% filter(status == "OK")
 truly_failed_baseIDs <- base_rescue %>% filter(status == "TRULY_FAILED")
 
 rescued_samples <- disagree_samples %>%
-  semi_join(rescued_baseIDs, by = "base_ID") %>%
-  arrange(base_ID, ID)
+  semi_join(rescued_baseIDs, by = "BASE_ID") %>%
+  arrange(BASE_ID, ID)
 
 truly_failed_samples <- disagree_samples %>%
-  semi_join(truly_failed_baseIDs, by = "base_ID") %>%
-  arrange(base_ID, ID) 
+  semi_join(truly_failed_baseIDs, by = "BASE_ID") %>%
+  arrange(BASE_ID, ID) 
 
 # Quick counts + peek
 base_rescue %>% count(status)
@@ -220,14 +234,45 @@ base_rescue %>%
 
 ```{r}
 # ============================================================
-# Choose best 2-sample combo per base_ID and average
+# Choose best 2-sample combo per BASE_ID and average
 # ============================================================
-
 tol <- 5  # 5 percentage points (0–100 scale)
 
-# Safety: ensure we have numeric sand/silt/clay in percent units
+# ===============================
+# Helper: USDA texture from averages
+# ===============================
+usda_texture_from_avg <- function(sand, silt, clay) {
+  tri <- data.frame(CLAY = clay, SILT = silt, SAND = sand)
+  m <- soiltexture::TT.points.in.classes(tri.data = tri, class.sys = "USDA.TT")
+  cls <- colnames(m)[which(m[1, ] == max(m[1, ], na.rm = TRUE))]
+  cls[1]
+}
+
+simplify_usda <- function(primary_texture) {
+  dplyr::case_when(
+    primary_texture == "SaClLo" ~ "SCL",
+    primary_texture == "Clo" ~ "CL",
+    primary_texture == "SaLo" ~ "SL",
+    primary_texture == "SaCl" ~ "SC",
+    primary_texture == "Lo" ~ "L",
+    primary_texture == "LoSa" ~ "LS",
+    primary_texture == "S" ~ "S",
+    primary_texture == "Cl" ~ "C",
+    primary_texture == "Si" ~ "SI",
+    primary_texture == "SiL" ~ "SIL",
+    primary_texture == "SiCl" ~ "SIC",
+    primary_texture == "SiClLo" ~ "SICL",
+    primary_texture == "SiLo" ~ "SIL",
+    primary_texture == "Sa" ~ "S",
+    TRUE ~ as.character(primary_texture)
+  )
+}
+
+# ===============================
+# Safety: numeric cleanup
+# ===============================
 dat <- lpsa2 %>%
-  filter(!is.na(base_ID), base_ID != "",
+  filter(!is.na(BASE_ID), BASE_ID != "",
          !is.na(texture_class), texture_class != "") %>%
   mutate(
     SAND = as.numeric(SAND),
@@ -236,9 +281,11 @@ dat <- lpsa2 %>%
   ) %>%
   filter(!is.na(SAND), !is.na(SILT), !is.na(CLAY))
 
-# Pairwise table for ALL base_IDs
+# ===============================
+# Pairwise table
+# ===============================
 pairwise_all <- dat %>%
-  group_by(base_ID) %>%
+  group_by(BASE_ID) %>%
   group_modify(\(d, key) {
     if (nrow(d) < 2) return(tibble())
 
@@ -262,21 +309,19 @@ pairwise_all <- dat %>%
       silt_diff = abs(silt_1 - silt_2),
       clay_diff = abs(clay_1 - clay_2),
 
-      # your 5% rescue rule: sand AND clay within tolerance
       pass_5pct = (sand_diff <= tol) & (clay_diff <= tol),
-
-      # total error for "lowest error combo"
       total_error = sand_diff + silt_diff + clay_diff
     )
   }) %>%
   ungroup()
 
-# Base-level chooser + averaged outputs
+# ===============================
+# Final chooser + averaged texture
+# ===============================
 avg_best2_by_base <- dat %>%
-  group_by(base_ID) %>%
+  group_by(BASE_ID) %>%
   group_modify(\(d, key) {
 
-    # If only 1 sample, we can't average a pair
     if (nrow(d) < 2) {
       return(tibble(
         n_samples = nrow(d),
@@ -287,41 +332,34 @@ avg_best2_by_base <- dat %>%
         avg_SAND = NA_real_,
         avg_SILT = NA_real_,
         avg_CLAY = NA_real_,
+        avg_primary_texture = NA_character_,
+        avg_texture_class = NA_character_,
         best_total_error = NA_real_
       ))
     }
 
-    pw <- pairwise_all %>% filter(base_ID == key$base_ID)
+    pw <- pairwise_all %>% filter(BASE_ID == key$BASE_ID)
 
-    # counts by class
     class_tab <- table(d$texture_class)
     modal_class <- names(which.max(class_tab))
     modal_n <- as.integer(max(class_tab))
     all_same_class <- length(class_tab) == 1
 
-    # helper to pick best row from pw (lowest error)
     pick_best <- function(x) x %>% arrange(total_error) %>% dplyr::slice(1)
 
-    chosen <- NULL
-    pick_status <- NULL
-
     if (all_same_class) {
-      # all same class: choose lowest error pair overall
       chosen <- pick_best(pw)
       pick_status <- "ALL_CLASS_AGREE"
 
     } else if (modal_n >= 2) {
-      # class OK: choose lowest-error pair within modal class
       chosen <- pw %>%
         filter(same_class, class_1 == modal_class) %>%
-        { if (nrow(.) == 0) pw %>% filter(same_class) else . } %>%   # fallback: any same-class
+        { if (nrow(.) == 0) pw %>% filter(same_class) else . } %>%
         pick_best()
       pick_status <- "CLASS_OK"
 
     } else {
-      # class disagreement: try 5% rescue
       pw_pass <- pw %>% filter(pass_5pct)
-
       if (nrow(pw_pass) > 0) {
         chosen <- pick_best(pw_pass)
         pick_status <- "RESCUED_5PCT"
@@ -331,22 +369,30 @@ avg_best2_by_base <- dat %>%
       }
     }
 
-    # compute averages for chosen IDs
     id1 <- chosen$ID_1[[1]]
     id2 <- chosen$ID_2[[1]]
 
-    r1 <- d %>% filter(ID == id1) %>% dplyr::slice(1)
-    r2 <- d %>% filter(ID == id2) %>% dplyr::slice(1)
+    r1 <- d %>% filter(ID == id1) %>% slice(1)
+    r2 <- d %>% filter(ID == id2) %>% slice(1)
+
+    avg_sand <- mean(c(r1$SAND, r2$SAND))
+    avg_silt <- mean(c(r1$SILT, r2$SILT))
+    avg_clay <- mean(c(r1$CLAY, r2$CLAY))
+
+    avg_primary_texture <- usda_texture_from_avg(avg_sand, avg_silt, avg_clay)
+    avg_texture_class <- simplify_usda(avg_primary_texture)
 
     tibble(
       n_samples = nrow(d),
       pick_status = pick_status,
       picked_ID_1 = id1,
       picked_ID_2 = id2,
-      picked_class = if (pick_status %in% c("ALL_CLASS_AGREE", "CLASS_OK")) modal_class else NA_character_,
-      avg_SAND = mean(c(r1$SAND, r2$SAND), na.rm = TRUE),
-      avg_SILT = mean(c(r1$SILT, r2$SILT), na.rm = TRUE),
-      avg_CLAY = mean(c(r1$CLAY, r2$CLAY), na.rm = TRUE),
+      picked_class = if (pick_status %in% c("ALL_CLASS_AGREE","CLASS_OK")) modal_class else NA_character_,
+      avg_SAND = avg_sand,
+      avg_SILT = avg_silt,
+      avg_CLAY = avg_clay,
+      avg_primary_texture = avg_primary_texture,
+      avg_texture_class = avg_texture_class,
       best_total_error = chosen$total_error[[1]],
       best_sand_diff = chosen$sand_diff[[1]],
       best_silt_diff = chosen$silt_diff[[1]],
@@ -354,7 +400,7 @@ avg_best2_by_base <- dat %>%
     )
   }) %>%
   ungroup() %>%
-  arrange(pick_status, desc(n_samples), base_ID)
+  arrange(pick_status, desc(n_samples), BASE_ID)
 
 # View summary counts
 avg_best2_by_base %>% count(pick_status)
@@ -379,19 +425,25 @@ highclay
 
 
 ```{r}
-#export but just keep base_ID, avg_SAND, avg_SILT, avg_CLAY, pick_status (rename to LPSA_texture_status), and picked_class (renamed to lab_texture_class)
+#export but just keep BASE_ID, avg_SAND, avg_SILT, avg_CLAY, pick_status (rename to LPSA_texture_status), and picked_class (renamed to lab_texture_class)
 
 final_output <- avg_best2_by_base %>%
   select(
-    base_ID,
+    BASE_ID,
     avg_SAND,
     avg_SILT,
     avg_CLAY,
     LPSA_texture_status = pick_status,
-    lab_texture_class = picked_class
+    lab_texture_class = avg_texture_class
   )
-final_output
+final_output_no_fails <- final_output #%>%
+  # filter(LPSA_texture_status == "ALL_CLASS_AGREE" | LPSA_texture_status == "CLASS_OK" | LPSA_texture_status == "RESCUED_5PCT")
+final_fails <- final_output %>%
+  filter(LPSA_texture_status == "FAILED" | LPSA_texture_status == "ONLY_ONE_SAMPLE")
 
+final_output_no_fails
+write_csv(final_output_no_fails, "../output_do_not_push/lpsa_final_texture_results_02_04_2026.csv")
+final_fails
 ```
 
 
