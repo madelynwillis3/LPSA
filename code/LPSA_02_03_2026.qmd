@@ -335,4 +335,294 @@ new_results %>%
 ```
 
 
+```{r}
+# ============================================================
+# AV LPSA parsing (UNIVERSAL) -> one consistent dataset
+# Handles:
+#   - raw-column AV csvs (converted "raw" files)
+#   - table/vertical/split-cell AV csvs (Oct/Nov PerryProfi style)
+# Uses STRICT scoring so junk blocks get rejected.
+# ============================================================
+
+library(tidyverse)
+library(readr)
+library(stringr)
+
+root_new <- "C:/git/LPSA/data/LPSA/LPSA data"
+root_old <- "../data/LPSA/LPSA data/"
+out_path <- "../output_do_not_push/lpsa_fixed_02_03_2026.csv"
+
+# ----------------------------
+# File list (AV ONLY)
+# ----------------------------
+av_files_all <- unique(c(
+  list.files(root_new, pattern="\\$av\\.\\.csv$", recursive=TRUE, full.names=TRUE),
+  list.files(root_old, pattern="\\$av\\.\\.csv$", recursive=TRUE, full.names=TRUE)
+)) %>%
+  discard(~ str_detect(basename(.x), "^~\\$"))
+
+cat("AV files total:", length(av_files_all), "\n")
+
+# ----------------------------
+# Utilities
+# ----------------------------
+normalize_raw_line <- function(x) {
+  x <- as.character(x)
+  x <- str_replace_all(x, "\ufeff", "")     # BOM
+  x <- str_replace_all(x, '^"+|"+$', "")    # wrap quotes
+  x <- str_replace_all(x, '\\\\\"', '"')    # unescape
+  x <- str_replace_all(x, '"\\s*,\\s*"', " ")
+  x <- str_replace_all(x, "\\t", " ")
+  x <- str_squish(x)
+  x
+}
+
+# Turn ANY AV csv into a "lines" vector
+# - if it has raw column: use it
+# - else: read with col_names=FALSE and paste each row into one line
+read_av_lines_any <- function(file_path) {
+  dfh <- suppressWarnings(read_csv(file_path, n_max = 2, show_col_types = FALSE))
+
+  if ("raw" %in% names(dfh)) {
+    df <- suppressWarnings(read_csv(file_path, show_col_types = FALSE))
+    lines <- df$raw %>% normalize_raw_line()
+    return(lines %>% discard(~ is.na(.x) || .x == ""))
+  }
+
+  df <- suppressWarnings(read_csv(file_path, col_names = FALSE, show_col_types = FALSE)) %>%
+    filter(!if_all(everything(), is.na))
+
+  if (nrow(df) == 0) return(character(0))
+
+  m <- df %>% mutate(across(everything(), as.character)) %>% as.matrix()
+
+  lines <- apply(m, 1, function(r) {
+    r <- r[!is.na(r)]
+    if (length(r) == 0) return("")
+    normalize_raw_line(paste(r, collapse = " "))
+  })
+
+  lines %>% discard(~ is.na(.x) || .x == "")
+}
+
+extract_sample_id_from_lines <- function(lines) {
+  # Case A: "Sample ID: 250246A"
+  id1 <- str_match(lines, regex("^sample\\s*id\\s*:\\s*(\\S+)", ignore_case = TRUE))[,2]
+  id1 <- id1[!is.na(id1)][1]
+  if (!is.na(id1)) {
+    id <- str_extract(id1, "\\d{5,6}[A-Za-z]?$")
+    return(toupper(id))
+  }
+
+  # Case B: "Sample ID:" then next line has the ID
+  i <- which(str_detect(lines, regex("^sample\\s*id\\s*:?\\s*$", ignore_case = TRUE)))[1]
+  if (is.na(i) || i + 1 > length(lines)) return(NA_character_)
+  id <- str_extract(lines[i + 1], "\\d{5,6}[A-Za-z]?$")
+  toupper(id)
+}
+
+# Find header indices for %< and %>
+# (works because our "lines" have whole rows collapsed)
+find_hdrs <- function(lines, lt = TRUE) {
+  pat <- if (lt) "%\\s*<" else "%\\s*>"
+
+  idx <- integer(0)
+
+  # same-line header
+  idx <- c(idx, which(str_detect(lines, regex("\\bsize\\b", ignore_case = TRUE)) & str_detect(lines, pat)))
+
+  # two-line header variants
+  for (i in seq_len(length(lines) - 1)) {
+    a <- lines[i]
+    b <- lines[i + 1]
+    if (str_detect(a, pat) && str_detect(b, regex("^size\\b", ignore_case = TRUE))) idx <- c(idx, i)
+    if (str_detect(a, regex("^size\\b", ignore_case = TRUE)) && str_detect(b, pat)) idx <- c(idx, i)
+  }
+
+  sort(unique(idx))
+}
+
+# Parse pairs from a block:
+#  - "2 70.6"
+#  - "2,70.6"
+#  - "2" then next line "70.6"
+parse_pairs <- function(block_lines) {
+  keepers <- block_lines %>% keep(~ str_detect(.x, "^\\d"))
+
+  out <- list()
+  k <- 1
+
+  while (k <= length(keepers)) {
+    ln <- keepers[k]
+
+    # Try: first two numbers anywhere on the line
+    nums <- str_extract_all(ln, "\\-?\\d+(?:\\.\\d+)?")[[1]]
+    if (length(nums) >= 2) {
+      out[[length(out) + 1]] <- tibble(
+        size  = suppressWarnings(as.numeric(nums[1])),
+        value = suppressWarnings(as.numeric(nums[2]))
+      )
+      k <- k + 1
+      next
+    }
+
+    # Split-line case: "2" then next line has value
+    size_val <- suppressWarnings(as.numeric(str_extract(ln, "^\\d+(?:\\.\\d+)?")))
+    if (!is.na(size_val) && (k + 1) <= length(keepers)) {
+      next_nums <- str_extract_all(keepers[k + 1], "\\-?\\d+(?:\\.\\d+)?")[[1]]
+      if (length(next_nums) >= 1) {
+        out[[length(out) + 1]] <- tibble(
+          size  = size_val,
+          value = suppressWarnings(as.numeric(next_nums[1]))
+        )
+        k <- k + 2
+        next
+      }
+    }
+
+    k <- k + 1
+  }
+
+  bind_rows(out) %>% filter(!is.na(size), !is.na(value))
+}
+
+# --- STRICT scoring: REQUIRE 2000 row ---
+score_lt_tbl <- function(tbl) {
+  v2000 <- tbl %>% filter(size == 2000) %>% pull(value) %>% first()
+  if (is.na(v2000)) return(list(score = -Inf, clay = NA_real_))
+  if (abs(v2000 - 100) > 2) return(list(score = -Inf, clay = NA_real_))
+
+  clay <- tbl %>% filter(size == 2) %>% pull(value) %>% first()
+  if (is.na(clay) || clay < 0 || clay > 100) return(list(score = -Inf, clay = NA_real_))
+
+  v50 <- tbl %>% filter(size == 50) %>% pull(value) %>% first()
+  if (is.na(v50) || v50 < clay) return(list(score = -Inf, clay = NA_real_))
+
+  score <- 1000 - abs(v2000 - 100) * 10
+  list(score = score, clay = clay)
+}
+
+score_gt_tbl <- function(tbl) {
+  v2000 <- tbl %>% filter(size == 2000) %>% pull(value) %>% first()
+  if (is.na(v2000)) return(list(score = -Inf, sand = NA_real_))
+  if (abs(v2000 - 0) > 2) return(list(score = -Inf, sand = NA_real_))
+
+  sand <- tbl %>% filter(size == 50) %>% pull(value) %>% first()
+  if (is.na(sand) || sand < 0 || sand > 100) return(list(score = -Inf, sand = NA_real_))
+
+  v2 <- tbl %>% filter(size == 2) %>% pull(value) %>% first()
+  if (!is.na(v2) && v2 < sand) return(list(score = -Inf, sand = NA_real_))
+
+  score <- 1000 - abs(v2000 - 0) * 10
+  list(score = score, sand = sand)
+}
+
+# ----------------------------
+# UNIVERSAL AV PARSER (this was missing in your paste)
+# ----------------------------
+parse_av_universal <- function(file_path) {
+  lines <- read_av_lines_any(file_path)
+  if (length(lines) == 0) return(NULL)
+
+  sample_id <- extract_sample_id_from_lines(lines)
+  if (is.na(sample_id) || sample_id == "") return(NULL)
+
+  lt_hdrs <- find_hdrs(lines, lt = TRUE)
+  gt_hdrs <- find_hdrs(lines, lt = FALSE)
+  if (length(lt_hdrs) == 0 || length(gt_hdrs) == 0) return(NULL)
+
+  # helper: find where numeric rows start after a header
+  data_start_after_hdr <- function(h) {
+    # If next line begins with "Size", skip it
+    if (h + 1 <= length(lines) && str_detect(lines[h + 1], regex("^size\\b", ignore_case = TRUE))) {
+      return(h + 2)
+    }
+    return(h + 1)
+  }
+
+  # ---- choose best %< candidate (STRICT scoring) ----
+  lt_best <- NULL
+  for (h in lt_hdrs) {
+    # end at first gt header after this header
+    gt_after <- gt_hdrs[gt_hdrs > h]
+    if (length(gt_after) == 0) next
+    gt_h <- gt_after[1]
+
+    start <- data_start_after_hdr(h)
+    end   <- gt_h - 1
+    if (end < start) next
+
+    tbl <- parse_pairs(lines[start:end])
+    s <- score_lt_tbl(tbl)
+    if (is.finite(s$score) && (is.null(lt_best) || s$score > lt_best$score)) {
+      lt_best <- s
+    }
+  }
+  if (is.null(lt_best)) return(NULL)
+
+  # ---- choose best %> candidate (STRICT scoring) ----
+  gt_best <- NULL
+  for (h in gt_hdrs) {
+    start <- data_start_after_hdr(h)
+
+    next_hdr <- c(lt_hdrs[lt_hdrs > h], gt_hdrs[gt_hdrs > h])
+    end <- if (length(next_hdr) == 0) length(lines) else min(next_hdr) - 1
+    if (end < start) next
+
+    tbl <- parse_pairs(lines[start:end])
+    s <- score_gt_tbl(tbl)
+    if (is.finite(s$score) && (is.null(gt_best) || s$score > gt_best$score)) {
+      gt_best <- s
+    }
+  }
+  if (is.null(gt_best)) return(NULL)
+
+  clay <- lt_best$clay
+  sand <- gt_best$sand
+  if (is.na(clay) || is.na(sand)) return(NULL)
+  if (clay < 0 || sand < 0 || (clay + sand) > 100) return(NULL)
+
+  tibble(
+    ID = sample_id,
+    base_ID = str_remove(sample_id, "[A-Z]$"),
+    sample_date = basename(dirname(file_path)),
+    clay = clay,
+    sand = sand,
+    silt = 100 - clay - sand,
+    CLAYPCT = clay/100,
+    SANDPCT = sand/100,
+    SILTPCT = (100 - clay - sand)/100,
+    source_file = file_path
+  )
+}
+
+# ----------------------------
+# Parse everything
+# ----------------------------
+all_results <- map_dfr(av_files_all, parse_av_universal) %>%
+  distinct(ID, source_file, .keep_all = TRUE) %>%
+  arrange(sample_date, ID)
+
+cat("PARSED rows:", nrow(all_results), "\n")
+cat("UNIQUE IDs:", n_distinct(all_results$ID), "\n")
+
+# Coverage report (AV only)
+parsed_norm <- normalizePath(all_results$source_file, winslash="/", mustWork=FALSE)
+av_norm <- normalizePath(av_files_all, winslash="/", mustWork=FALSE)
+missing_av <- av_files_all[!(av_norm %in% parsed_norm)]
+
+cat("Missing AV files:", length(missing_av), "\n")
+if (length(missing_av) > 0) print(missing_av[1:min(30, length(missing_av))])
+
+# Example: check October folder
+all_results %>%
+  filter(str_detect(source_file, "October")) %>%
+  select(ID, clay, sand, silt, source_file) %>%
+  distinct() %>%
+  print(n = 50)
+
+# Save
+# write_csv(all_results, out_path)
+# cat("Saved:", out_path, "\n")
+```
 
