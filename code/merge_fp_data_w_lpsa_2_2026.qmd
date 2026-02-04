@@ -40,6 +40,11 @@ merged_data <- fp_data %>%
   left_join(lpsa, by = c("Sample.ID.Lab" = "BASE_ID"))
 
 merged_data
+
+fp_txt_fails <- merged_data %>%
+  filter(LPSA_texture_status == "FAILED" | LPSA_texture_status == "ONLY_ONE_SAMPLE" )
+
+fp_txt_fails
 ```
 
 
