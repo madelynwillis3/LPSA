@@ -17,7 +17,6 @@ test
 
 ```{r}
 
-
 root <- "../data/LPSA/LPSA_data"
 
 read_lpsa_raw <- function(path) {
