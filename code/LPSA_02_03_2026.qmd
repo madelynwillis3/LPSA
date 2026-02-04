@@ -1,0 +1,344 @@
+---
+title: "LPSA_02_03_2026"
+format: html
+---
+
+```{r lpsa-parsers, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(readr)
+library(stringr)
+
+normalize_raw_line <- function(x) {
+  x <- as.character(x)
+  x <- str_replace_all(x, '^"+|"+$', "")
+  x <- str_replace_all(x, '\\\\\"', '"')
+  x <- str_replace_all(x, '"\\s*,\\s*"', " ")
+  x <- str_replace_all(x, "\\t", " ")
+  x <- str_squish(x)
+  x
+}
+
+# ---------- NEW (raw-column) parser (your working one) ----------
+parse_new_raw_av <- function(file_path) {
+  df <- suppressWarnings(read_csv(file_path, show_col_types = FALSE))
+  if (!("raw" %in% names(df))) return(NULL)
+
+  lines <- df$raw %>% normalize_raw_line() %>% discard(~ is.na(.x) || .x == "")
+
+  # Sample ID: handle both "Sample ID: 250246A" and "Sample ID:" then next token
+  id1 <- str_match(lines, regex("^sample\\s*id\\s*:\\s*(\\S+)", ignore_case = TRUE))[,2]
+  sample_id <- id1[!is.na(id1)][1]
+  if (is.na(sample_id)) {
+    i <- which(str_detect(lines, regex("^sample\\s*id\\s*:?\\s*$", ignore_case = TRUE)))[1]
+    if (!is.na(i) && i + 1 <= length(lines)) sample_id <- lines[i + 1]
+  }
+  sample_id <- str_extract(sample_id, "\\d{5,6}[A-Za-z]?$") %>% toupper()
+  if (is.na(sample_id) || sample_id == "") return(NULL)
+
+  lt_all <- which(str_detect(lines, "%\\s*<"))
+  gt_all <- which(str_detect(lines, "%\\s*>"))
+  if (length(lt_all) == 0 || length(gt_all) == 0) return(NULL)
+
+  parse_pairs_raw <- function(start_i, end_i) {
+    if (end_i <= start_i + 1) return(tibble(size=numeric(), value=numeric()))
+    block <- lines[(start_i + 1):(end_i - 1)]
+    block %>%
+      keep(~ str_detect(.x, "^\\d")) %>%
+      map_dfr(\(ln) {
+        m <- str_match(ln, "^(\\d+(?:\\.\\d+)?)\\s*,?\\s*(\\-?\\d+(?:\\.\\d+)?)")
+        tibble(
+          size  = suppressWarnings(as.numeric(m[,2])),
+          value = suppressWarnings(as.numeric(m[,3]))
+        )
+      }) %>%
+      filter(!is.na(size), !is.na(value))
+  }
+
+  for (lt_idx in rev(lt_all)) {
+    gt_after <- gt_all[gt_all > lt_idx]
+    if (length(gt_after) == 0) next
+    gt_idx <- gt_after[1]
+
+    less_tbl <- parse_pairs_raw(lt_idx, gt_idx)
+    greater_tbl <- parse_pairs_raw(gt_idx, length(lines) + 1)
+
+    clay <- less_tbl %>% filter(size == 2, value >= 0, value <= 100) %>% pull(value) %>% first()
+    sand <- greater_tbl %>% filter(size == 50, value >= 0, value <= 100) %>% pull(value) %>% first()
+
+    if (!is.na(clay) && !is.na(sand) && clay + sand <= 100) {
+      return(tibble(
+        ID = sample_id,
+        base_ID = str_remove(sample_id, "[A-Z]$"),
+        sample_date = basename(dirname(file_path)),
+        clay = clay,
+        sand = sand,
+        silt = 100 - clay - sand,
+        CLAYPCT = clay/100,
+        SANDPCT = sand/100,
+        SILTPCT = (100 - clay - sand)/100,
+        source_file = file_path,
+        source_type = "new"
+      ))
+    }
+  }
+
+  NULL
+}
+
+# ---------- OLD (2-col table) parser (this is the one you want) ----------
+# Flexible OLD table parser:
+# - Accepts headers where Size is in col1 OR col2
+# - Scores candidate %< tables by 2000≈100 and having size=2
+# - Scores candidate %> tables by 2000≈0 and having size=50
+# - This rescues Oct/Nov files that are flipped or spaced oddly
+
+numify <- function(x) suppressWarnings(as.numeric(gsub("[^0-9\\.\\-]+", "", as.character(x))))
+trimc  <- function(x) str_squish(str_replace_all(as.character(x), '"', ""))
+
+extract_sample_id_from_df <- function(df) {
+  # find any row containing "Sample ID" in either of first two cols
+  hit <- which(str_detect(df[[1]], regex("sample\\s*id", ignore_case=TRUE)) |
+                 str_detect(df[[2]], regex("sample\\s*id", ignore_case=TRUE)))[1]
+  if (is.na(hit)) return(NA_character_)
+
+  cand <- c(df[[2]][hit], df[[1]][hit],
+            if (hit+1 <= nrow(df)) df[[1]][hit+1] else NA_character_,
+            if (hit+1 <= nrow(df)) df[[2]][hit+1] else NA_character_)
+
+  out <- str_extract(cand, "\\d{5,6}[A-Za-z]?$") %>% na.omit() %>% first()
+  toupper(out)
+}
+
+parse_table_below <- function(df, hdr_row, size_col, val_col, look_ahead=80) {
+  r1 <- hdr_row + 1
+  r2 <- min(nrow(df), hdr_row + look_ahead)
+  if (r1 > r2) return(tibble(size=numeric(), value=numeric()))
+  block <- df[r1:r2, , drop=FALSE]
+
+  tibble(
+    size  = map_dbl(block[[size_col]], numify),
+    value = map_dbl(block[[val_col]],  numify)
+  ) %>%
+    filter(!is.na(size), !is.na(value))
+}
+
+score_lt <- function(tbl) {
+  clay  <- tbl %>% filter(size == 2, value >= 0, value <= 100) %>% pull(value) %>% first()
+  v2000 <- tbl %>% filter(size == 2000) %>% pull(value) %>% first()
+  score <- 0
+  if (!is.na(v2000)) score <- score + (100 - abs(v2000 - 100))
+  if (!is.na(clay))  score <- score + 50
+  list(score=score, clay=clay)
+}
+
+score_gt <- function(tbl) {
+  sand  <- tbl %>% filter(size == 50, value >= 0, value <= 100) %>% pull(value) %>% first()
+  v2000 <- tbl %>% filter(size == 2000) %>% pull(value) %>% first()
+  score <- 0
+  if (!is.na(v2000)) score <- score + (100 - abs(v2000 - 0))
+  if (!is.na(sand))  score <- score + 50
+  list(score=score, sand=sand)
+}
+
+parse_old_table_av_flexible <- function(file_path) {
+  df <- suppressWarnings(read_csv(file_path, col_names=FALSE, show_col_types=FALSE)) %>%
+    filter(!if_all(everything(), is.na))
+
+  if (ncol(df) < 2) return(NULL)
+  df <- df %>% mutate(across(everything(), trimc))
+
+  sample_id <- extract_sample_id_from_df(df)
+  if (is.na(sample_id) || sample_id == "") return(NULL)
+
+  sample_date <- basename(dirname(file_path))
+  base_id <- str_remove(sample_id, "[A-Z]$")
+
+  # Candidate headers for %< and %>:
+  # We accept either orientation:
+  # (col1 == "Size" & col2 contains "% <") OR (col2 == "Size" & col1 contains "% <")
+  lt_hdrs <- which((df[[1]] == "Size" & str_detect(df[[2]], "%\\s*<")) |
+                     (df[[2]] == "Size" & str_detect(df[[1]], "%\\s*<")))
+  gt_hdrs <- which((df[[1]] == "Size" & str_detect(df[[2]], "%\\s*>")) |
+                     (df[[2]] == "Size" & str_detect(df[[1]], "%\\s*>")))
+
+  if (length(lt_hdrs) == 0 || length(gt_hdrs) == 0) return(NULL)
+
+  # Choose best %< table
+  best_lt <- NULL
+  for (r in lt_hdrs) {
+    if (df[[1]][r] == "Size") {
+      tbl <- parse_table_below(df, r, size_col=1, val_col=2)
+    } else {
+      tbl <- parse_table_below(df, r, size_col=2, val_col=1)
+    }
+    s <- score_lt(tbl)
+    if (is.null(best_lt) || s$score > best_lt$score) best_lt <- s
+  }
+
+  # Choose best %> table
+  best_gt <- NULL
+  for (r in gt_hdrs) {
+    if (df[[1]][r] == "Size") {
+      tbl <- parse_table_below(df, r, size_col=1, val_col=2)
+    } else {
+      tbl <- parse_table_below(df, r, size_col=2, val_col=1)
+    }
+    s <- score_gt(tbl)
+    if (is.null(best_gt) || s$score > best_gt$score) best_gt <- s
+  }
+
+  clay <- best_lt$clay
+  sand <- best_gt$sand
+  if (is.na(clay) || is.na(sand)) return(NULL)
+  if (clay < 0 || sand < 0 || clay + sand > 100) return(NULL)
+
+  tibble(
+    ID = sample_id,
+    base_ID = base_id,
+    sample_date = sample_date,
+    clay = clay,
+    sand = sand,
+    silt = 100 - clay - sand,
+    CLAYPCT = clay/100,
+    SANDPCT = sand/100,
+    SILTPCT = (100 - clay - sand)/100,
+    source_file = file_path,
+    source_type = "old"
+  )
+}
+```
+
+
+
+
+## Chunk 2 — build `new_results`
+
+```{r lpsa-new-results, warning=FALSE, message=FALSE}
+root_new <- "C:/git/LPSA/data/LPSA/LPSA data"
+
+new_av_files <- list.files(
+  root_new,
+  pattern="\\$av\\.\\.csv$",
+  recursive=TRUE,
+  full.names=TRUE
+) %>% discard(~ str_detect(basename(.x), "^~\\$"))
+
+new_results <- map_dfr(new_av_files, parse_new_raw_av)
+
+cat("NEW files:", length(new_av_files), "\n")
+cat("NEW parsed:", nrow(new_results), "\n")
+
+```
+
+---
+
+## Chunk 3 — build `old_results` (THIS is the fix)
+
+**Important change:** we are NOT using “old vertical parser” anymore. We’re using your original logic, but stricter about “Size must be col 1”.
+
+
+```{r lpsa-old-results, warning=FALSE, message=FALSE}
+# old AV files with NO raw column (table-style)
+old_av_files <- list.files(root_old, pattern="\\$av\\.\\.csv$", recursive=TRUE, full.names=TRUE) %>%
+  discard(~ str_detect(basename(.x), "^~\\$"))
+
+has_raw_col <- function(f) {
+  hdr <- suppressWarnings(read_csv(f, n_max=1, show_col_types=FALSE))
+  "raw" %in% names(hdr)
+}
+
+old_av_files_table <- old_av_files %>% discard(has_raw_col)
+
+old_results <- map_dfr(old_av_files_table, parse_old_table_av_flexible)
+
+cat("OLD table files:", length(old_av_files_table), "\n")
+cat("OLD parsed rows:", nrow(old_results), "\n")
+
+# sanity: does your missing example show up now?
+old_results %>% filter(str_detect(source_file, "November") | str_detect(source_file, "October")) %>%
+  count(sample_date) %>% arrange(desc(n)) %>% print(n=50)
+
+```
+
+```{r lpsa-coverage-check, warning=FALSE, message=FALSE}
+
+all_av_files <- unique(c(
+  list.files(root_new, pattern="\\$av\\.\\.csv$", recursive=TRUE, full.names=TRUE),
+  list.files(root_old, pattern="\\$av\\.\\.csv$", recursive=TRUE, full.names=TRUE)
+)) %>% discard(~ str_detect(basename(.x), "^~\\$"))
+
+parsed_files <- bind_rows(new_results, old_results) %>%
+  distinct(source_file) %>%
+  mutate(norm = normalizePath(source_file, winslash="/", mustWork=FALSE))
+
+missing_files <- tibble(f = all_av_files) %>%
+  mutate(norm = normalizePath(f, winslash="/", mustWork=FALSE)) %>%
+  filter(!(norm %in% parsed_files$norm)) %>%
+  pull(f)
+
+cat("Total AV files:", length(all_av_files), "\n")
+cat("Parsed rows:", nrow(bind_rows(new_results, old_results)), "\n")
+cat("Missing files:", length(missing_files), "\n")
+
+# Show a few missing (you'll likely see Oct/Nov here)
+print(head(missing_files, 30))
+
+```
+
+
+
+---
+
+## Chunk 4 — merge + save
+
+
+```{r lpsa-merge-save, warning=FALSE, message=FALSE}
+out_path <- "../output_do_not_push/lpsa_fixed_02_03_2026.csv"
+
+all_results <- bind_rows(new_results, old_results) %>%
+  mutate(priority = if_else(source_type == "new", 1L, 2L)) %>%
+  arrange(ID, priority) %>%
+  group_by(ID) %>%
+  dplyr::slice(1) %>%
+  ungroup() %>%
+  select(-priority) %>%
+  arrange(sample_date, ID)
+
+cat("FINAL rows:", nrow(all_results), "\n")
+cat("FINAL unique IDs:", n_distinct(all_results$ID), "\n")
+
+# write_csv(all_results, out_path)
+# cat("Saved:", out_path, "\n")
+```
+
+
+---
+
+# If October/November are *still* missing: one-shot debug that tells you WHY
+Run this after Chunk A identifies `missing_files`:
+
+```{r lpsa-debug-missing, warning=FALSE, message=FALSE}
+
+debug_one <- function(f) {
+  df <- suppressWarnings(read_csv(f, col_names=FALSE, n_max=120, show_col_types=FALSE))
+  ncols <- ncol(df)
+
+  has_raw <- "raw" %in% names(suppressWarnings(read_csv(f, n_max=1, show_col_types=FALSE)))
+
+  tibble(
+    file = f,
+    ncols = ncols,
+    has_raw = has_raw,
+    has_pct_lt = any(str_detect(readLines(f, n=120, warn=FALSE), "%\\s*<")),
+    has_pct_gt = any(str_detect(readLines(f, n=120, warn=FALSE), "%\\s*>")),
+    has_sample = any(str_detect(readLines(f, n=120, warn=FALSE), regex("sample\\s*id", ignore_case=TRUE)))
+  )
+}
+
+dbg <- map_dfr(head(missing_files, 50), debug_one)
+print(dbg)
+
+```
+
+
+
