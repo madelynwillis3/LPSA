@@ -318,25 +318,19 @@ cat("FINAL unique IDs:", n_distinct(all_results$ID), "\n")
 Run this after Chunk A identifies `missing_files`:
 
 ```{r lpsa-debug-missing, warning=FALSE, message=FALSE}
+# show parsed rows coming from October folder
+new_results %>%
+  filter(str_detect(source_file, "October 16th, 2025")) %>%
+  select(ID, clay, sand, silt, source_file) %>%
+  distinct() %>%
+  print(n = 200)
 
-debug_one <- function(f) {
-  df <- suppressWarnings(read_csv(f, col_names=FALSE, n_max=120, show_col_types=FALSE))
-  ncols <- ncol(df)
+# specifically check the exact file you pasted
+new_results %>%
+  filter(source_file == "C:/git/LPSA/data/LPSA/LPSA data/October 16th, 2025/PerryProfi_250525A_16 Oct 2025_07-32_06.$av..csv") %>%
+  select(ID, clay, sand, silt, source_file) %>%
+  print(n = 50)
 
-  has_raw <- "raw" %in% names(suppressWarnings(read_csv(f, n_max=1, show_col_types=FALSE)))
-
-  tibble(
-    file = f,
-    ncols = ncols,
-    has_raw = has_raw,
-    has_pct_lt = any(str_detect(readLines(f, n=120, warn=FALSE), "%\\s*<")),
-    has_pct_gt = any(str_detect(readLines(f, n=120, warn=FALSE), "%\\s*>")),
-    has_sample = any(str_detect(readLines(f, n=120, warn=FALSE), regex("sample\\s*id", ignore_case=TRUE)))
-  )
-}
-
-dbg <- map_dfr(head(missing_files, 50), debug_one)
-print(dbg)
 
 ```
 
